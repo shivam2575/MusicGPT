@@ -10,7 +10,7 @@ warnings.filterwarnings("ignore")
 
 LLM = ChatOpenAI(
     model="gpt-4",
-    api_key=os.getenv("OpenAiKey"),
+    api_key=os.getenv("OPENAI_KEY"),
     temperature=0
 )
 

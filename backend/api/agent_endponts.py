@@ -1,103 +1,79 @@
-import operator
-import time
+import os
 
-from agents.argument_analyser import ArgumentAnalyzer
-from agents.movie_recommender import MovieRecommender
-from agents.supervisor_agent import Supervisor
-from fastapi import FastAPI, status, Body
-from langchain_core.messages import HumanMessage, BaseMessage
-from langgraph.graph import StateGraph, START, END
+import bcrypt
+from fastapi import FastAPI, Depends, HTTPException
+from fastapi import status
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import TypedDict, Literal, Optional, Annotated, Sequence
+from sqlalchemy import Column, String
+from sqlalchemy import create_engine
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import Session
+from sqlalchemy.orm import sessionmaker
 
-app = FastAPI(
-    title="Movie GPT",
+app = FastAPI()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # For development only. Use your domain in prod.
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-
-class DataInput(BaseModel):
-    prompt: str
-    chat_history: Optional[list]
+Base = declarative_base()
 
 
-class AgentState(TypedDict):
-    messages: Annotated[Sequence[BaseMessage], operator.add]
-    chat_history: list
-    next: str
-    supervisor_instructions: Annotated[Sequence[str], operator.add]
-    agent_call_list: Annotated[Sequence[str], operator.add]
-    final_response: str
-    usage: list
+class LoginRequest(BaseModel):
+    username: str
+    password: str
 
 
-class MovieRecommendationResponse(BaseModel):
-    agent_output: str
+class User(Base):
+    __tablename__ = 'users'
+    username = Column(String(50), primary_key=True)
+    password_hash = Column(String(100))
 
 
-@app.get("/")
-async def read_root():
-    return {"message": "Music GPT"}
+DB_USER = os.getenv("AWS_RDS_MySQL_USERNAME")
+DB_PASSWORD = os.getenv("AWS_RDS_MySQL_PASSWORD")
+DB_HOST = os.getenv("AWS_RDS_MySQL_HOST")
+DB_PORT = os.getenv("AWS_RDS_MySQL_PORT")
+DB_NAME = os.getenv("AWS_RDS_MySQL_NAME")
+DATABASE_URL = (
+    f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}"
+    f"@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+)
+
+engine = create_engine(DATABASE_URL)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
-@app.get("/ping", status_code=status.HTTP_200_OK)
-def ping():
-    now = time.time()
-    ping = {"api": "MusicGPT", "time-stamp": now}
-    return ping
-
-
-@app.post("/recommend-movie")
-async def recommend_movie(
-        data: DataInput = Body(...)
-):
+def get_db():
+    db = SessionLocal()
     try:
-        print("Flag-1")
-        prompt = data.prompt
-        chat_history = data.chat_history
+        yield db
+    finally:
+        db.close()
 
-        supervisor_agent = Supervisor()
-        argument_analyser_agent = ArgumentAnalyzer()
-        movie_recommendation_agent = MovieRecommender()
 
-        print("Flag-2")
-        graph = StateGraph(AgentState)
-        graph.add_node("Supervisor", supervisor_agent.perform_task)
-        graph.add_node("Argument Analyzer Agent", argument_analyser_agent.perform_task)
-        graph.add_node("Movie Recommender", movie_recommendation_agent.perform_task)
+@app.post("/login")
+def login(data: LoginRequest, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.username == data.username).first()
+    if not user or not bcrypt.checkpw(data.password.encode('utf-8'), user.password_hash.encode('utf-8')):
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+    return {"message": "Login successful"}
 
-        conditional_map = {
-            "Input Argument Analyzer Agent": "Argument Analyzer Agent",
-            "Movie Recommendation Agent": "Movie Recommender",
-            "FINISH": END
-        }
 
-        print("Flag-3")
-        graph.add_edge(START, "Supervisor")
-        graph.add_conditional_edges("Supervisor", lambda x: x["next"], conditional_map)
+@app.post("/signup", status_code=status.HTTP_201_CREATED)
+def signup(data: LoginRequest, db: Session = Depends(get_db)):
+    existing_user = db.query(User).filter(User.username == data.username).first()
+    if existing_user:
+        raise HTTPException(status_code=400, detail="Username already exists")
 
-        print("Flag-4")
-        # Compile the graph
-        app_graph = graph.compile()
+    hashed_password = bcrypt.hashpw(data.password.encode('utf-8'), bcrypt.gensalt())
 
-        # Initialize state
-        initial_state = AgentState(
-            messages=[HumanMessage(content=prompt)],
-            chat_history=[],
-            next="",
-            supervisor_instructions="",
-            agent_call_list=[],
-            final_response="",
-            usage=[]
-        )
+    new_user = User(username=data.username, password_hash=hashed_password.decode('utf-8'))
+    db.add(new_user)
+    db.commit()
 
-        print("Executing the graph")
-        # Execute the graph
-        result = app_graph.invoke(initial_state)
-
-        # Return the response
-        return MovieRecommendationResponse(
-            agent_output=result.get("output_for_user", "No output from the agent."),
-        )
-
-    except Exception as err:
-        raise err
+    return {"message": "User created successfully"}
